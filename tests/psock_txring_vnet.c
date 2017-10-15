@@ -59,19 +59,21 @@ static struct in_addr ip_saddr, ip_daddr;
 
 /* must configure real daddr (should really infer or pass on cmdline) */
 const char cfg_mac_src[] = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
-const char cfg_mac_dst[] = { 0x00, 0x11, 0x0a, 0x5c, 0x7e, 0x56 };
+const char cfg_mac_dst[] = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
 
 static int socket_open(void)
 {
 	int fd, val;
 
-	fd = socket(PF_PACKET, SOCK_RAW, 0 /* disable reading */);
+	fd = socket(PF_PACKET, SOCK_RAW, ETH_P_ALL /* disable reading */);
 	if (fd == -1)
 		error(1, errno, "socket");
 
-	val = TPACKET_V2;
-	if (setsockopt(fd, SOL_PACKET, PACKET_VERSION, &val, sizeof(val)))
-		error(1, errno, "setsockopt version");
+	if (cfg_enable_ring)  {
+		val = TPACKET_V2;
+		if (setsockopt(fd, SOL_PACKET, PACKET_VERSION, &val, sizeof(val)))
+			error(1, errno, "setsockopt version");
+	}
 
 	if (cfg_qdisc_bypass) {
 		val = 1;
@@ -279,20 +281,21 @@ static void vector_write(int fd, int count)
 	struct mmsghdr *loop, *msgvec = NULL;
 	struct iovec *iov = NULL;
 	int i, ret;
+	char *packet;
 
 	fprintf(stderr, "vector size: %u\n", count);
 	msgvec = malloc(sizeof(struct mmsghdr) * count);
 	if (msgvec == NULL) {
 		error(1, ENOMEM, "alloc mmsg vector");
 	}
-	iov = malloc(sizeof(struct iovec) * count * 2);
+	iov = malloc(sizeof(struct iovec) * count * 3);
 	if (iov == NULL) {
 		error(1, ENOMEM, "alloc iov vector");
 	}
 	loop = msgvec;
 	for (i = 0; i < count ; i++) {
 		loop->msg_hdr.msg_iov = iov;
-		loop->msg_hdr.msg_iovlen = 1;
+		loop->msg_hdr.msg_iovlen = 2;
 		loop->msg_hdr.msg_control = NULL;
 		loop->msg_hdr.msg_controllen = 0;
 		loop->msg_hdr.msg_flags = MSG_DONTWAIT;
@@ -310,14 +313,20 @@ static void vector_write(int fd, int count)
 			}
 			iov++;
 		} 
-		iov->iov_base = malloc(
+		packet = malloc(
 			cfg_payload_len + sizeof(struct ethhdr)
 			+ sizeof(struct iphdr) + sizeof(struct tcphdr));
-		if (iov->iov_base == NULL) {
+		if (packet == NULL) {
 			error(1, ENOMEM, "alloc payload");
 			iov->iov_len = 0;
 		} else {
-			set_packet(iov->iov_base, 0, cfg_payload_len);
+			set_packet(packet, 0, cfg_payload_len);
+			iov->iov_base = packet;
+			iov->iov_len = sizeof(struct ethhdr)
+				+ sizeof(struct iphdr) + sizeof(struct tcphdr);
+			iov++;
+			iov->iov_base = packet + sizeof(struct ethhdr)
+				+ sizeof(struct iphdr) + sizeof(struct tcphdr);
 			iov->iov_len = cfg_payload_len;
 		}
 		iov++;
@@ -336,7 +345,7 @@ static void socket_bind(int fd)
 
 	addr.sll_family =	AF_PACKET;
 	addr.sll_ifindex =	cfg_ifindex;
-	addr.sll_protocol =	htons(ETH_P_IP);
+	addr.sll_protocol =	htons(ETH_P_ALL);
 	addr.sll_halen =	ETH_ALEN;
 
 	if (bind(fd, (void *) &addr, sizeof(addr)))
